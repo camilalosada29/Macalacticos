@@ -31,6 +31,39 @@ export function AppProvider({ children }) {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
   }, []);
 
+  // BroadcastChannel for instant cross-tab real-time synchronization
+  useEffect(() => {
+    let bc;
+    try {
+      bc = new BroadcastChannel('ml_calendar_realtime_sync');
+      bc.onmessage = (e) => {
+        if (e.data && e.data.type === 'sync') {
+          // Trigger reload from localStorage
+          const storedEvents = localStorage.getItem('ml_events');
+          if (storedEvents) setEvents(JSON.parse(storedEvents));
+          const storedTeam = localStorage.getItem('ml_team');
+          if (storedTeam) setTeam(JSON.parse(storedTeam));
+          const storedCat = localStorage.getItem('ml_categories');
+          if (storedCat) setCategories(JSON.parse(storedCat));
+          toast('⚡ Cambios sincronizados en tiempo real', 'info');
+        }
+      };
+    } catch {
+      // BroadcastChannel fallback handled by storage event listener in useLocalStorage
+    }
+    return () => {
+      if (bc) bc.close();
+    };
+  }, [setEvents, setTeam, setCategories, toast]);
+
+  const notifyBroadcast = useCallback(() => {
+    try {
+      const bc = new BroadcastChannel('ml_calendar_realtime_sync');
+      bc.postMessage({ type: 'sync', timestamp: Date.now() });
+      bc.close();
+    } catch {}
+  }, []);
+
   // ==================== NOTIFICATIONS ====================
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
 
@@ -114,18 +147,21 @@ export function AppProvider({ children }) {
     const newEvent = { ...eventData, id: generateId() };
     setEvents(prev => [...prev, newEvent]);
     toast('Evento creado', 'success');
+    notifyBroadcast();
     return newEvent;
-  }, [setEvents, toast]);
+  }, [setEvents, toast, notifyBroadcast]);
 
   const updateEvent = useCallback((id, data) => {
     setEvents(prev => prev.map(e => e.id === id ? { ...e, ...data } : e));
     toast('Evento actualizado', 'success');
-  }, [setEvents, toast]);
+    notifyBroadcast();
+  }, [setEvents, toast, notifyBroadcast]);
 
   const deleteEvent = useCallback((id) => {
     setEvents(prev => prev.filter(e => e.id !== id));
     toast('Evento eliminado', 'success');
-  }, [setEvents, toast]);
+    notifyBroadcast();
+  }, [setEvents, toast, notifyBroadcast]);
 
   // Team
   const addMember = useCallback((name, role) => {
@@ -135,23 +171,27 @@ export function AppProvider({ children }) {
     const member = { id: Date.now(), name, role: role || 'Miembro', avatar: initials, color, status: 'online', photo: null };
     setTeam(prev => [...prev, member]);
     toast('Miembro agregado', 'success');
-  }, [setTeam, toast]);
+    notifyBroadcast();
+  }, [setTeam, toast, notifyBroadcast]);
 
   const deleteMember = useCallback((id) => {
     setTeam(prev => prev.filter(m => m.id !== id));
     if (filterMemberId === id) setFilterMemberId(null);
     toast('Miembro eliminado', 'success');
-  }, [setTeam, filterMemberId, toast]);
+    notifyBroadcast();
+  }, [setTeam, filterMemberId, toast, notifyBroadcast]);
 
   const updateMemberRole = useCallback((id, newRole) => {
     setTeam(prev => prev.map(m => m.id === id ? { ...m, role: newRole } : m));
     toast('Rol actualizado', 'success');
-  }, [setTeam, toast]);
+    notifyBroadcast();
+  }, [setTeam, toast, notifyBroadcast]);
 
   const updateMemberPhoto = useCallback((id, photoBase64) => {
     setTeam(prev => prev.map(m => m.id === id ? { ...m, photo: photoBase64 } : m));
     toast('Foto actualizada', 'success');
-  }, [setTeam, toast]);
+    notifyBroadcast();
+  }, [setTeam, toast, notifyBroadcast]);
 
   // Filtered events
   const getFilteredEvents = useCallback(() => {

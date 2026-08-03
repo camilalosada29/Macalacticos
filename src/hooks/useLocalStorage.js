@@ -11,8 +11,26 @@ export function useLocalStorage(key, defaultValue) {
   });
 
   useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(value));
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      console.error('LocalStorage write error:', e);
+    }
   }, [key, value]);
+
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key === key) {
+        try {
+          setValue(e.newValue ? JSON.parse(e.newValue) : defaultValue);
+        } catch {
+          setValue(defaultValue);
+        }
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, [key, defaultValue]);
 
   return [value, setValue];
 }
