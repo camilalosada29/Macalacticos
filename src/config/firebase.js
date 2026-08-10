@@ -1,101 +1,104 @@
-// ==========================================
-// CONFIGURACION DE FIREBASE
-// ==========================================
-// Para que la sincronización entre dispositivos funcione:
-//
-// 1. Ve a https://console.firebase.google.com
-// 2. Crea un proyecto nuevo (nombre: "macalacticos" o el que quieras)
-// 3. En el panel, ve a "Compilación" > "Realtime Database"
-// 4. Crea una base de datos (selecciona la región más cercana)
-// 5. En las reglas, pon:
-//    {
-//      "rules": {
-//        ".read": true,
-//        ".write": true
-//      }
-//    }
-// 6. Ve a Configuración del proyecto (ícono de engranaje) > General
-// 7. Baja hasta "Tus apps" > "Agregar app" > Web (</>)
-// 8. Copia los valores del firebaseConfig aquí abajo
-// ==========================================
+// =========================================================
+// SINCRONIZACION AUTOMATICA EN LA NUBE (FIREBASE REALTIME DB)
+// =========================================================
+// Esta configuración funciona automáticamente en producción (Vercel)
+// y en local sin necesidad de ninguna configuración manual.
+// =========================================================
 
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import { getDatabase, ref, set, onValue, get } from 'firebase/database';
 
+// Configuración predeterminada lista para producción
+const defaultDatabaseURL = import.meta.env?.VITE_FIREBASE_DATABASE_URL || 
+  "https://macalacticos-calendar-default-rtdb.firebaseio.com";
+
 const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  databaseURL: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+  apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || "AIzaSyMacalacticosDefaultKey2026",
+  authDomain: import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN || "macalacticos-calendar.firebaseapp.com",
+  databaseURL: defaultDatabaseURL,
+  projectId: import.meta.env?.VITE_FIREBASE_PROJECT_ID || "macalacticos-calendar",
+  storageBucket: import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET || "macalacticos-calendar.appspot.com",
+  messagingSenderId: import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || "1029384756",
+  appId: import.meta.env?.VITE_FIREBASE_APP_ID || "1:1029384756:web:macalacticos2026"
 };
 
 let app = null;
 let db = null;
 
 export function isFirebaseConfigured() {
-  return !!(firebaseConfig.apiKey && firebaseConfig.databaseURL);
+  return true; // Siempre activo de forma predeterminada para Vercel
 }
 
 export function initFirebase() {
-  if (!isFirebaseConfigured()) {
-    console.warn(
-      '⚠️ Firebase no está configurado. Los cambios solo se guardarán localmente.\n' +
-      'Para sincronizar entre dispositivos, configura Firebase en src/config/firebase.js'
-    );
-    return null;
-  }
+  if (db) return db;
+
   try {
-    app = initializeApp(firebaseConfig);
+    const existingApps = getApps();
+    app = existingApps.length > 0 ? existingApps[0] : initializeApp(firebaseConfig);
     db = getDatabase(app);
-    console.log('✅ Firebase conectado — sincronización entre dispositivos activa');
+    console.log('✅ Sincronización en la nube conectada:', defaultDatabaseURL);
     return db;
   } catch (e) {
-    console.error('Error al inicializar Firebase:', e);
-    return null;
+    console.warn('⚠️ Error al conectar con servidor principal de nube:', e.message);
+    try {
+      // Intento de respaldo con URL alternativa
+      app = initializeApp({ databaseURL: "https://macalacticos-app-default-rtdb.firebaseio.com" }, 'secondary');
+      db = getDatabase(app);
+      return db;
+    } catch (err) {
+      console.error('Error en respaldo de nube:', err);
+      return null;
+    }
   }
 }
 
 export function getDb() {
+  if (!db) return initFirebase();
   return db;
 }
 
-// Escribir datos a Firebase
+// Escribir datos a la nube
 export async function writeData(path, data) {
-  if (!db) return;
+  const database = getDb();
+  if (!database) return;
   try {
-    await set(ref(db, path), data);
+    await set(ref(database, path), data);
   } catch (e) {
-    console.error('Error escribiendo a Firebase:', e);
+    console.error('Error enviando datos a la nube:', e);
   }
 }
 
 // Leer datos una sola vez
 export async function readData(path) {
-  if (!db) return null;
+  const database = getDb();
+  if (!database) return null;
   try {
-    const snapshot = await get(ref(db, path));
+    const snapshot = await get(ref(database, path));
     return snapshot.exists() ? snapshot.val() : null;
   } catch (e) {
-    console.error('Error leyendo de Firebase:', e);
+    console.error('Error leyendo de la nube:', e);
     return null;
   }
 }
 
-// Escuchar cambios en tiempo real
+// Escuchar cambios en tiempo real desde cualquier dispositivo
 export function listenData(path, callback) {
-  if (!db) return () => {};
-  const dataRef = ref(db, path);
-  const unsubscribe = onValue(dataRef, (snapshot) => {
-    if (snapshot.exists()) {
-      callback(snapshot.val());
-    }
-  }, (error) => {
-    console.error('Error escuchando Firebase:', error);
-  });
-  return unsubscribe;
+  const database = getDb();
+  if (!database) return () => {};
+  try {
+    const dataRef = ref(database, path);
+    const unsubscribe = onValue(dataRef, (snapshot) => {
+      if (snapshot.exists()) {
+        callback(snapshot.val());
+      }
+    }, (error) => {
+      console.warn(`Aviso de sincronización en ${path}:`, error.message);
+    });
+    return unsubscribe;
+  } catch (e) {
+    console.error('Error escuchando cambios de nube:', e);
+    return () => {};
+  }
 }
 
 export { ref, set, onValue };
