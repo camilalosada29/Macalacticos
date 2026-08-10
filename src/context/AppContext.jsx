@@ -1,7 +1,8 @@
-import { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { DEFAULT_TEAM, DEFAULT_CATEGORIES, AVATAR_COLORS } from '../data/initialData';
 import { generateId, formatDate } from '../utils/dateUtils';
+import { initFirebase, isFirebaseConfigured, writeData, listenData } from '../config/firebase';
 
 const AppContext = createContext(null);
 
@@ -24,6 +25,10 @@ export function AppProvider({ children }) {
 
   const [categories, setCategories] = useLocalStorage('ml_categories', DEFAULT_CATEGORIES);
 
+  // Ref to track if incoming update is from Firebase (prevent loops)
+  const isFirebaseUpdate = useRef(false);
+  const firebaseReady = useRef(false);
+
   // Toast
   const toast = useCallback((msg, type = 'info') => {
     const id = Date.now();
@@ -31,30 +36,75 @@ export function AppProvider({ children }) {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
   }, []);
 
-  // BroadcastChannel for instant cross-tab real-time synchronization
+  // ==================== FIREBASE REAL-TIME SYNC ====================
+  useEffect(() => {
+    if (!isFirebaseConfigured()) return;
+
+    const db = initFirebase();
+    if (!db) return;
+    firebaseReady.current = true;
+
+    // Escuchar cambios en eventos desde Firebase (otros dispositivos)
+    const unsubEvents = listenData('calendar/events', (data) => {
+      const firebaseEvents = data ? (Array.isArray(data) ? data : Object.values(data)) : [];
+      isFirebaseUpdate.current = true;
+      setEvents(firebaseEvents);
+      setTimeout(() => { isFirebaseUpdate.current = false; }, 100);
+    });
+
+    // Escuchar cambios en equipo desde Firebase
+    const unsubTeam = listenData('calendar/team', (data) => {
+      if (data) {
+        const firebaseTeam = Array.isArray(data) ? data : Object.values(data);
+        isFirebaseUpdate.current = true;
+        setTeam(firebaseTeam);
+        setTimeout(() => { isFirebaseUpdate.current = false; }, 100);
+      }
+    });
+
+    // Escuchar cambios en categorías desde Firebase
+    const unsubCats = listenData('calendar/categories', (data) => {
+      if (data) {
+        const firebaseCats = Array.isArray(data) ? data : Object.values(data);
+        isFirebaseUpdate.current = true;
+        setCategories(firebaseCats);
+        setTimeout(() => { isFirebaseUpdate.current = false; }, 100);
+      }
+    });
+
+    return () => {
+      if (typeof unsubEvents === 'function') unsubEvents();
+      if (typeof unsubTeam === 'function') unsubTeam();
+      if (typeof unsubCats === 'function') unsubCats();
+    };
+  }, []); // Run once on mount
+
+  // Sync local changes TO Firebase
+  const syncToFirebase = useCallback((newEvents, newTeam, newCategories) => {
+    if (!firebaseReady.current || isFirebaseUpdate.current) return;
+    if (newEvents !== undefined) writeData('calendar/events', newEvents);
+    if (newTeam !== undefined) writeData('calendar/team', newTeam);
+    if (newCategories !== undefined) writeData('calendar/categories', newCategories);
+  }, []);
+
+  // BroadcastChannel for same-device cross-tab sync (still useful)
   useEffect(() => {
     let bc;
     try {
       bc = new BroadcastChannel('ml_calendar_realtime_sync');
       bc.onmessage = (e) => {
         if (e.data && e.data.type === 'sync') {
-          // Trigger reload from localStorage
           const storedEvents = localStorage.getItem('ml_events');
           if (storedEvents) setEvents(JSON.parse(storedEvents));
           const storedTeam = localStorage.getItem('ml_team');
           if (storedTeam) setTeam(JSON.parse(storedTeam));
           const storedCat = localStorage.getItem('ml_categories');
           if (storedCat) setCategories(JSON.parse(storedCat));
-          toast('⚡ Cambios sincronizados en tiempo real', 'info');
         }
       };
-    } catch {
-      // BroadcastChannel fallback handled by storage event listener in useLocalStorage
-    }
-    return () => {
-      if (bc) bc.close();
-    };
-  }, [setEvents, setTeam, setCategories, toast]);
+    } catch {}
+    return () => { if (bc) bc.close(); };
+  }, [setEvents, setTeam, setCategories]);
 
   const notifyBroadcast = useCallback(() => {
     try {
@@ -90,13 +140,9 @@ export function AppProvider({ children }) {
       if (!('Notification' in window) || Notification.permission !== 'granted') return;
       const now = new Date();
       const todayStr = formatDate(now);
-      const currentHour = String(now.getHours()).padStart(2, '0');
-      const currentMin = String(now.getMinutes()).padStart(2, '0');
-      const nowTime = `${currentHour}:${currentMin}`;
 
       events.forEach(evt => {
         if (evt.date === todayStr && evt.time) {
-          // Notify if event starts within 5 minutes
           const [eH, eM] = evt.time.split(':').map(Number);
           const evtMinutes = eH * 60 + eM;
           const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -126,10 +172,12 @@ export function AppProvider({ children }) {
         toast('La categoría ya existe', 'error');
         return prev;
       }
+      const updated = [...prev, newCat];
+      syncToFirebase(undefined, undefined, updated);
       toast('Categoría agregada', 'success');
-      return [...prev, newCat];
+      return updated;
     });
-  }, [setCategories, toast]);
+  }, [setCategories, toast, syncToFirebase]);
 
   const deleteCategory = useCallback((id) => {
     setCategories(prev => {
@@ -137,31 +185,45 @@ export function AppProvider({ children }) {
         toast('Debes mantener al menos una categoría', 'error');
         return prev;
       }
+      const updated = prev.filter(c => c.id !== id);
+      syncToFirebase(undefined, undefined, updated);
       toast('Categoría eliminada', 'success');
-      return prev.filter(c => c.id !== id);
+      return updated;
     });
-  }, [setCategories, toast]);
+  }, [setCategories, toast, syncToFirebase]);
 
   // Events
   const addEvent = useCallback((eventData) => {
     const newEvent = { ...eventData, id: generateId() };
-    setEvents(prev => [...prev, newEvent]);
+    setEvents(prev => {
+      const updated = [...prev, newEvent];
+      syncToFirebase(updated, undefined, undefined);
+      return updated;
+    });
     toast('Evento creado', 'success');
     notifyBroadcast();
     return newEvent;
-  }, [setEvents, toast, notifyBroadcast]);
+  }, [setEvents, toast, notifyBroadcast, syncToFirebase]);
 
   const updateEvent = useCallback((id, data) => {
-    setEvents(prev => prev.map(e => e.id === id ? { ...e, ...data } : e));
+    setEvents(prev => {
+      const updated = prev.map(e => e.id === id ? { ...e, ...data } : e);
+      syncToFirebase(updated, undefined, undefined);
+      return updated;
+    });
     toast('Evento actualizado', 'success');
     notifyBroadcast();
-  }, [setEvents, toast, notifyBroadcast]);
+  }, [setEvents, toast, notifyBroadcast, syncToFirebase]);
 
   const deleteEvent = useCallback((id) => {
-    setEvents(prev => prev.filter(e => e.id !== id));
+    setEvents(prev => {
+      const updated = prev.filter(e => e.id !== id);
+      syncToFirebase(updated, undefined, undefined);
+      return updated;
+    });
     toast('Evento eliminado', 'success');
     notifyBroadcast();
-  }, [setEvents, toast, notifyBroadcast]);
+  }, [setEvents, toast, notifyBroadcast, syncToFirebase]);
 
   // Team
   const addMember = useCallback((name, role) => {
@@ -169,29 +231,45 @@ export function AppProvider({ children }) {
     const initials = (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
     const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
     const member = { id: Date.now(), name, role: role || 'Miembro', avatar: initials, color, status: 'online', photo: null };
-    setTeam(prev => [...prev, member]);
+    setTeam(prev => {
+      const updated = [...prev, member];
+      syncToFirebase(undefined, updated, undefined);
+      return updated;
+    });
     toast('Miembro agregado', 'success');
     notifyBroadcast();
-  }, [setTeam, toast, notifyBroadcast]);
+  }, [setTeam, toast, notifyBroadcast, syncToFirebase]);
 
   const deleteMember = useCallback((id) => {
-    setTeam(prev => prev.filter(m => m.id !== id));
+    setTeam(prev => {
+      const updated = prev.filter(m => m.id !== id);
+      syncToFirebase(undefined, updated, undefined);
+      return updated;
+    });
     if (filterMemberId === id) setFilterMemberId(null);
     toast('Miembro eliminado', 'success');
     notifyBroadcast();
-  }, [setTeam, filterMemberId, toast, notifyBroadcast]);
+  }, [setTeam, filterMemberId, toast, notifyBroadcast, syncToFirebase]);
 
   const updateMemberRole = useCallback((id, newRole) => {
-    setTeam(prev => prev.map(m => m.id === id ? { ...m, role: newRole } : m));
+    setTeam(prev => {
+      const updated = prev.map(m => m.id === id ? { ...m, role: newRole } : m);
+      syncToFirebase(undefined, updated, undefined);
+      return updated;
+    });
     toast('Rol actualizado', 'success');
     notifyBroadcast();
-  }, [setTeam, toast, notifyBroadcast]);
+  }, [setTeam, toast, notifyBroadcast, syncToFirebase]);
 
   const updateMemberPhoto = useCallback((id, photoBase64) => {
-    setTeam(prev => prev.map(m => m.id === id ? { ...m, photo: photoBase64 } : m));
+    setTeam(prev => {
+      const updated = prev.map(m => m.id === id ? { ...m, photo: photoBase64 } : m);
+      syncToFirebase(undefined, updated, undefined);
+      return updated;
+    });
     toast('Foto actualizada', 'success');
     notifyBroadcast();
-  }, [setTeam, toast, notifyBroadcast]);
+  }, [setTeam, toast, notifyBroadcast, syncToFirebase]);
 
   // Filtered events
   const getFilteredEvents = useCallback(() => {
@@ -241,6 +319,7 @@ export function AppProvider({ children }) {
     getFilteredEvents,
     openNewEvent, openEditEvent, openNewTask,
     notificationsEnabled, requestNotifications,
+    firebaseActive: firebaseReady.current,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
