@@ -1,4 +1,47 @@
-import { connectToDatabase } from '../lib/mongodb.js';
+import { MongoClient } from 'mongodb';
+
+// Configuración de MongoDB Atlas
+const DEFAULT_URI = "mongodb+srv://camilalosada29_db_user:pLl5v7hBbGpkOR47@cluster0.9gtunbm.mongodb.net/?appName=Cluster0";
+const DB_NAME = 'Camila';
+const COLLECTION_NAME = 'CamilaCalendar';
+
+let cachedClient = global._mongoClient || null;
+let cachedDb = global._mongoDb || null;
+
+async function connectToDatabase() {
+  const uri = process.env.MONGODB_URI || DEFAULT_URI;
+
+  if (cachedClient && cachedDb) {
+    try {
+      await cachedDb.command({ ping: 1 });
+      return { client: cachedClient, db: cachedDb, collection: cachedDb.collection(COLLECTION_NAME) };
+    } catch {
+      cachedClient = null;
+      cachedDb = null;
+    }
+  }
+
+  const client = new MongoClient(uri, {
+    maxPoolSize: 10,
+    connectTimeoutMS: 10000,
+    serverSelectionTimeoutMS: 10000,
+  });
+
+  await client.connect();
+  const db = client.db(DB_NAME);
+
+  global._mongoClient = client;
+  global._mongoDb = db;
+
+  cachedClient = client;
+  cachedDb = db;
+
+  return {
+    client,
+    db,
+    collection: db.collection(COLLECTION_NAME)
+  };
+}
 
 const DEFAULT_TEAM = [
   { id: 1, name: 'Camila Losada', role: 'Project Manager', avatar: 'CL', color: '#E91E63', status: 'online' },
@@ -224,8 +267,8 @@ export default async function handler(req, res) {
     console.error('Error en API /api/calendar:', error);
     return res.status(500).json({
       success: false,
-      error: error.message || 'Error interno del servidor en MongoDB',
-      details: String(error)
+      error: error?.message || String(error),
+      details: 'Error de conexión con MongoDB Atlas en Vercel. Verifica el acceso de IP 0.0.0.0/0 en MongoDB Atlas Console -> Network Access.'
     });
   }
 }
