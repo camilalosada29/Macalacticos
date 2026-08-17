@@ -36,6 +36,9 @@ export function AppProvider({ children }) {
     try {
       setLoading(true);
       const res = await fetch('/api/calendar');
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
       const result = await res.json();
 
       if (result.success && result.data) {
@@ -48,7 +51,7 @@ export function AppProvider({ children }) {
       }
     } catch (err) {
       console.error('Error de conexión a la API:', err);
-      toast('No se pudo conectar a la API de MongoDB', 'error');
+      toast('Error de conexión con MongoDB Atlas', 'error');
     } finally {
       setLoading(false);
     }
@@ -116,6 +119,8 @@ export function AppProvider({ children }) {
       return;
     }
 
+    setCategories(prev => [...prev, catData]);
+
     try {
       const res = await fetch('/api/calendar', {
         method: 'POST',
@@ -123,17 +128,18 @@ export function AppProvider({ children }) {
         body: JSON.stringify({ itemType: 'category', itemData: catData })
       });
       const result = await res.json();
-      if (result.success && result.item) {
-        setCategories(prev => [...prev, result.item]);
+      if (result.success) {
         toast('Categoría guardada en MongoDB Atlas', 'success');
       } else {
-        toast('Error al guardar categoría en MongoDB', 'error');
+        toast('Error al guardar categoría', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al guardar categoría:', err);
       toast('Error de red al guardar categoría', 'error');
+      fetchCalendarData();
     }
-  }, [categories, toast]);
+  }, [categories, toast, fetchCalendarData]);
 
   const deleteCategory = useCallback(async (id) => {
     if (categories.length <= 1) {
@@ -141,7 +147,6 @@ export function AppProvider({ children }) {
       return;
     }
 
-    const previousCategories = [...categories];
     setCategories(prev => prev.filter(c => c.id !== id));
 
     try {
@@ -152,19 +157,22 @@ export function AppProvider({ children }) {
       if (result.success) {
         toast('Categoría eliminada de MongoDB Atlas', 'success');
       } else {
-        toast('Error al eliminar categoría en MongoDB', 'error');
-        setCategories(previousCategories);
+        toast('Error al eliminar categoría', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al eliminar categoría:', err);
       toast('Error de red al eliminar categoría', 'error');
-      setCategories(previousCategories);
+      fetchCalendarData();
     }
-  }, [categories, toast]);
+  }, [categories.length, toast, fetchCalendarData]);
 
   // ==================== EVENTOS (MongoDB Atlas) ====================
   const addEvent = useCallback(async (eventData) => {
-    const newEventData = { ...eventData, id: generateId() };
+    const newEventData = { ...eventData, id: eventData.id || generateId() };
+
+    // Actualización optimista de UI
+    setEvents(prev => [...prev, newEventData]);
 
     try {
       const res = await fetch('/api/calendar', {
@@ -173,21 +181,21 @@ export function AppProvider({ children }) {
         body: JSON.stringify({ itemType: 'event', itemData: newEventData })
       });
       const result = await res.json();
-      if (result.success && result.item) {
-        setEvents(prev => [...prev, result.item]);
-        toast('Evento creado en MongoDB Atlas', 'success');
-        return result.item;
+      if (result.success) {
+        toast('Guardado en MongoDB Atlas', 'success');
+        return newEventData;
       } else {
-        toast('Error al guardar evento en MongoDB', 'error');
+        toast('Error al guardar en MongoDB', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al crear evento:', err);
       toast('Error de red al crear evento', 'error');
+      fetchCalendarData();
     }
-  }, [toast]);
+  }, [toast, fetchCalendarData]);
 
   const updateEvent = useCallback(async (id, data) => {
-    const previousEvents = [...events];
     setEvents(prev => prev.map(e => e.id === id ? { ...e, ...data } : e));
 
     try {
@@ -198,20 +206,19 @@ export function AppProvider({ children }) {
       });
       const result = await res.json();
       if (result.success) {
-        toast('Evento actualizado en MongoDB Atlas', 'success');
+        toast('Actualizado en MongoDB Atlas', 'success');
       } else {
-        toast('Error al actualizar evento en MongoDB', 'error');
-        setEvents(previousEvents);
+        toast('Error al actualizar en MongoDB', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al actualizar evento:', err);
-      toast('Error de red al actualizar evento', 'error');
-      setEvents(previousEvents);
+      toast('Error de red al actualizar', 'error');
+      fetchCalendarData();
     }
-  }, [events, toast]);
+  }, [toast, fetchCalendarData]);
 
   const deleteEvent = useCallback(async (id) => {
-    const previousEvents = [...events];
     setEvents(prev => prev.filter(e => e.id !== id));
 
     try {
@@ -220,17 +227,17 @@ export function AppProvider({ children }) {
       });
       const result = await res.json();
       if (result.success) {
-        toast('Evento eliminado de MongoDB Atlas', 'success');
+        toast('Eliminado de MongoDB Atlas', 'success');
       } else {
-        toast('Error al eliminar evento en MongoDB', 'error');
-        setEvents(previousEvents);
+        toast('Error al eliminar en MongoDB', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al eliminar evento:', err);
-      toast('Error de red al eliminar evento', 'error');
-      setEvents(previousEvents);
+      toast('Error de red al eliminar', 'error');
+      fetchCalendarData();
     }
-  }, [events, toast]);
+  }, [toast, fetchCalendarData]);
 
   // ==================== EQUIPO (MongoDB Atlas) ====================
   const addMember = useCallback(async (name, role) => {
@@ -239,6 +246,8 @@ export function AppProvider({ children }) {
     const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
     const memberData = { id: Date.now(), name, role: role || 'Miembro', avatar: initials, color, status: 'online', photo: null };
 
+    setTeam(prev => [...prev, memberData]);
+
     try {
       const res = await fetch('/api/calendar', {
         method: 'POST',
@@ -246,20 +255,20 @@ export function AppProvider({ children }) {
         body: JSON.stringify({ itemType: 'team', itemData: memberData })
       });
       const result = await res.json();
-      if (result.success && result.item) {
-        setTeam(prev => [...prev, result.item]);
+      if (result.success) {
         toast('Miembro agregado a MongoDB Atlas', 'success');
       } else {
-        toast('Error al guardar miembro en MongoDB', 'error');
+        toast('Error al guardar miembro', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al agregar miembro:', err);
       toast('Error de red al agregar miembro', 'error');
+      fetchCalendarData();
     }
-  }, [toast]);
+  }, [toast, fetchCalendarData]);
 
   const deleteMember = useCallback(async (id) => {
-    const previousTeam = [...team];
     setTeam(prev => prev.filter(m => m.id !== id));
     if (filterMemberId === id) setFilterMemberId(null);
 
@@ -271,18 +280,17 @@ export function AppProvider({ children }) {
       if (result.success) {
         toast('Miembro eliminado de MongoDB Atlas', 'success');
       } else {
-        toast('Error al eliminar miembro en MongoDB', 'error');
-        setTeam(previousTeam);
+        toast('Error al eliminar miembro', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al eliminar miembro:', err);
       toast('Error de red al eliminar miembro', 'error');
-      setTeam(previousTeam);
+      fetchCalendarData();
     }
-  }, [team, filterMemberId, toast]);
+  }, [filterMemberId, toast, fetchCalendarData]);
 
   const updateMemberRole = useCallback(async (id, newRole) => {
-    const previousTeam = [...team];
     setTeam(prev => prev.map(m => m.id === id ? { ...m, role: newRole } : m));
 
     try {
@@ -295,18 +303,17 @@ export function AppProvider({ children }) {
       if (result.success) {
         toast('Rol actualizado en MongoDB Atlas', 'success');
       } else {
-        toast('Error al actualizar rol en MongoDB', 'error');
-        setTeam(previousTeam);
+        toast('Error al actualizar rol', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al actualizar rol:', err);
       toast('Error de red al actualizar rol', 'error');
-      setTeam(previousTeam);
+      fetchCalendarData();
     }
-  }, [team, toast]);
+  }, [toast, fetchCalendarData]);
 
   const updateMemberPhoto = useCallback(async (id, photoBase64) => {
-    const previousTeam = [...team];
     setTeam(prev => prev.map(m => m.id === id ? { ...m, photo: photoBase64 } : m));
 
     try {
@@ -319,15 +326,15 @@ export function AppProvider({ children }) {
       if (result.success) {
         toast('Foto actualizada en MongoDB Atlas', 'success');
       } else {
-        toast('Error al actualizar foto en MongoDB', 'error');
-        setTeam(previousTeam);
+        toast('Error al actualizar foto', 'error');
+        fetchCalendarData();
       }
     } catch (err) {
       console.error('Error al actualizar foto:', err);
       toast('Error de red al actualizar foto', 'error');
-      setTeam(previousTeam);
+      fetchCalendarData();
     }
-  }, [team, toast]);
+  }, [toast, fetchCalendarData]);
 
   // Eventos filtrados
   const getFilteredEvents = useCallback(() => {

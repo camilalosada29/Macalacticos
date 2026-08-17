@@ -72,10 +72,11 @@ function normalizeId(id) {
 }
 
 export default async function handler(req, res) {
-  // Configurar cabeceras CORS y JSON
+  // Cabeceras CORS completas para Vercel
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, PATCH, DELETE, POST, PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -88,11 +89,11 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const docs = await collection.find({}).toArray();
 
-      let teamDocs = docs.filter(d => d.entityType === 'team');
-      let categoryDocs = docs.filter(d => d.entityType === 'category');
-      let eventDocs = docs.filter(d => d.entityType === 'event');
+      let teamDocs = docs.filter(d => d.entityType === 'team' || (d.role && d.name));
+      let categoryDocs = docs.filter(d => d.entityType === 'category' || (d.name && d.color && !d.role && !d.date));
+      let eventDocs = docs.filter(d => d.entityType === 'event' || (d.title && (d.date || d.type)));
 
-      // Si la colección está vacía en MongoDB Atlas, sembrar datos iniciales por defecto
+      // Si la colección está vacía en MongoDB Atlas, sembrar datos iniciales
       if (docs.length === 0) {
         const initialTeam = DEFAULT_TEAM.map(m => ({ ...m, entityType: 'team' }));
         const initialCats = DEFAULT_CATEGORIES.map(c => ({ ...c, entityType: 'category' }));
@@ -106,7 +107,7 @@ export default async function handler(req, res) {
         eventDocs = initialEvts;
       }
 
-      // Mapear quitando _id interno o convirtiéndolo para la respuesta limpia a React
+      // Mapear los documentos para retornar arreglos limpios a React
       const team = teamDocs.map(({ _id, entityType, ...rest }) => rest);
       const categories = categoryDocs.map(({ _id, entityType, ...rest }) => rest);
       const events = eventDocs.map(({ _id, entityType, ...rest }) => rest);
@@ -117,8 +118,11 @@ export default async function handler(req, res) {
       });
     }
 
-    // Parsear body para POST, PUT, DELETE
-    const body = req.body || {};
+    // Parsear body por si viene como cadena JSON en Vercel
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch {}
+    }
 
     // ==================== POST: CREAR DOCUMENTO ====================
     if (req.method === 'POST') {
@@ -130,7 +134,7 @@ export default async function handler(req, res) {
 
       const newItem = {
         ...itemData,
-        id: itemData.id || (itemType === 'team' ? Date.now() : generateId()),
+        id: itemData.id !== undefined ? itemData.id : (itemType === 'team' ? Date.now() : generateId()),
         entityType: itemType,
         createdAt: new Date().toISOString()
       };
@@ -152,16 +156,25 @@ export default async function handler(req, res) {
         return res.status(400).json({ success: false, error: 'Faltan parámetros requeridos (itemType, id, data)' });
       }
 
-      const queryId = normalizeId(id);
+      const normId = normalizeId(id);
+      const numId = Number(id);
+
+      const orConditions = [{ id: normId }, { id: String(id) }];
+      if (!isNaN(numId)) {
+        orConditions.push({ id: numId });
+      }
 
       const filter = {
-        entityType: itemType,
-        $or: [{ id: queryId }, { id: String(id) }]
+        $or: [
+          { entityType: itemType, $or: orConditions },
+          { entityType: { $exists: false }, $or: orConditions }
+        ]
       };
 
       const updateDoc = {
         $set: {
           ...data,
+          entityType: itemType,
           updatedAt: new Date().toISOString()
         }
       };
@@ -176,18 +189,26 @@ export default async function handler(req, res) {
 
     // ==================== DELETE: ELIMINAR DOCUMENTO ====================
     if (req.method === 'DELETE') {
-      const id = req.query.id || body.id;
-      const itemType = req.query.itemType || body.itemType;
+      const id = req.query?.id || body?.id;
+      const itemType = req.query?.itemType || body?.itemType;
 
       if (!id || !itemType) {
         return res.status(400).json({ success: false, error: 'Faltan parámetros requeridos (id, itemType)' });
       }
 
-      const queryId = normalizeId(id);
+      const normId = normalizeId(id);
+      const numId = Number(id);
+
+      const orConditions = [{ id: normId }, { id: String(id) }];
+      if (!isNaN(numId)) {
+        orConditions.push({ id: numId });
+      }
 
       const filter = {
-        entityType: itemType,
-        $or: [{ id: queryId }, { id: String(id) }]
+        $or: [
+          { entityType: itemType, $or: orConditions },
+          { entityType: { $exists: false }, $or: orConditions }
+        ]
       };
 
       const result = await collection.deleteOne(filter);
