@@ -1,14 +1,15 @@
-import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { useLocalStorage } from '../hooks/useLocalStorage';
+import { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { DEFAULT_TEAM, DEFAULT_CATEGORIES, AVATAR_COLORS } from '../data/initialData';
 import { generateId, formatDate } from '../utils/dateUtils';
-import { initFirebase, isFirebaseConfigured, writeData, listenData } from '../config/firebase';
 
 const AppContext = createContext(null);
 
 export function AppProvider({ children }) {
-  const [events, setEvents] = useLocalStorage('ml_events', []);
-  const [team, setTeam] = useLocalStorage('ml_team', DEFAULT_TEAM);
+  const [events, setEvents] = useState([]);
+  const [team, setTeam] = useState(DEFAULT_TEAM);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [loading, setLoading] = useState(true);
+
   const [currentView, setCurrentView] = useState('calendar');
   const [calendarView, setCalendarView] = useState('month');
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -23,98 +24,41 @@ export function AppProvider({ children }) {
   const [memberModalOpen, setMemberModalOpen] = useState(false);
   const [eventPopup, setEventPopup] = useState({ open: false, eventId: null, x: 0, y: 0 });
 
-  const [categories, setCategories] = useLocalStorage('ml_categories', DEFAULT_CATEGORIES);
-
-  // Ref to track if incoming update is from Firebase (prevent loops)
-  const isFirebaseUpdate = useRef(false);
-  const firebaseReady = useRef(false);
-
-  // Toast
+  // Toast notification helper
   const toast = useCallback((msg, type = 'info') => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, msg, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
   }, []);
 
-  // ==================== FIREBASE REAL-TIME SYNC ====================
-  useEffect(() => {
-    if (!isFirebaseConfigured()) return;
-
-    const db = initFirebase();
-    if (!db) return;
-    firebaseReady.current = true;
-
-    // Escuchar cambios en eventos desde Firebase (otros dispositivos)
-    const unsubEvents = listenData('calendar/events', (data) => {
-      const firebaseEvents = data ? (Array.isArray(data) ? data : Object.values(data)) : [];
-      isFirebaseUpdate.current = true;
-      setEvents(firebaseEvents);
-      setTimeout(() => { isFirebaseUpdate.current = false; }, 100);
-    });
-
-    // Escuchar cambios en equipo desde Firebase
-    const unsubTeam = listenData('calendar/team', (data) => {
-      if (data) {
-        const firebaseTeam = Array.isArray(data) ? data : Object.values(data);
-        isFirebaseUpdate.current = true;
-        setTeam(firebaseTeam);
-        setTimeout(() => { isFirebaseUpdate.current = false; }, 100);
-      }
-    });
-
-    // Escuchar cambios en categorías desde Firebase
-    const unsubCats = listenData('calendar/categories', (data) => {
-      if (data) {
-        const firebaseCats = Array.isArray(data) ? data : Object.values(data);
-        isFirebaseUpdate.current = true;
-        setCategories(firebaseCats);
-        setTimeout(() => { isFirebaseUpdate.current = false; }, 100);
-      }
-    });
-
-    return () => {
-      if (typeof unsubEvents === 'function') unsubEvents();
-      if (typeof unsubTeam === 'function') unsubTeam();
-      if (typeof unsubCats === 'function') unsubCats();
-    };
-  }, []); // Run once on mount
-
-  // Sync local changes TO Firebase
-  const syncToFirebase = useCallback((newEvents, newTeam, newCategories) => {
-    if (!firebaseReady.current || isFirebaseUpdate.current) return;
-    if (newEvents !== undefined) writeData('calendar/events', newEvents);
-    if (newTeam !== undefined) writeData('calendar/team', newTeam);
-    if (newCategories !== undefined) writeData('calendar/categories', newCategories);
-  }, []);
-
-  // BroadcastChannel for same-device cross-tab sync (still useful)
-  useEffect(() => {
-    let bc;
+  // ==================== Cargar datos desde MongoDB Atlas ====================
+  const fetchCalendarData = useCallback(async () => {
     try {
-      bc = new BroadcastChannel('ml_calendar_realtime_sync');
-      bc.onmessage = (e) => {
-        if (e.data && e.data.type === 'sync') {
-          const storedEvents = localStorage.getItem('ml_events');
-          if (storedEvents) setEvents(JSON.parse(storedEvents));
-          const storedTeam = localStorage.getItem('ml_team');
-          if (storedTeam) setTeam(JSON.parse(storedTeam));
-          const storedCat = localStorage.getItem('ml_categories');
-          if (storedCat) setCategories(JSON.parse(storedCat));
-        }
-      };
-    } catch {}
-    return () => { if (bc) bc.close(); };
-  }, [setEvents, setTeam, setCategories]);
+      setLoading(true);
+      const res = await fetch('/api/calendar');
+      const result = await res.json();
 
-  const notifyBroadcast = useCallback(() => {
-    try {
-      const bc = new BroadcastChannel('ml_calendar_realtime_sync');
-      bc.postMessage({ type: 'sync', timestamp: Date.now() });
-      bc.close();
-    } catch {}
-  }, []);
+      if (result.success && result.data) {
+        if (result.data.events) setEvents(result.data.events);
+        if (result.data.team && result.data.team.length > 0) setTeam(result.data.team);
+        if (result.data.categories && result.data.categories.length > 0) setCategories(result.data.categories);
+      } else {
+        console.error('Error al cargar datos desde MongoDB Atlas:', result.error);
+        toast('Error al consultar MongoDB Atlas', 'error');
+      }
+    } catch (err) {
+      console.error('Error de conexión a la API:', err);
+      toast('No se pudo conectar a la API de MongoDB', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
 
-  // ==================== NOTIFICATIONS ====================
+  useEffect(() => {
+    fetchCalendarData();
+  }, [fetchCalendarData]);
+
+  // ==================== NOTIFICACIONES ====================
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
 
   const requestNotifications = useCallback(() => {
@@ -130,7 +74,7 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
-  // Check for due tasks/events every 60 seconds
+  // Check for due tasks/events
   useEffect(() => {
     if (!notificationsEnabled && 'Notification' in window && Notification.permission === 'granted') {
       setNotificationsEnabled(true);
@@ -159,125 +103,239 @@ export function AppProvider({ children }) {
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [events, notificationsEnabled, setEvents]);
+  }, [events, notificationsEnabled]);
 
-  // Categories
-  const addCategory = useCallback((name, color) => {
+  // ==================== CATEGORIAS (MongoDB Atlas) ====================
+  const addCategory = useCallback(async (name, color) => {
     if (!name.trim()) return;
     const id = name.trim().toLowerCase().replace(/\s+/g, '-');
-    const newCat = { id, name: name.trim(), color: color || '#FFE600' };
+    const catData = { id, name: name.trim(), color: color || '#FFE600' };
 
-    setCategories(prev => {
-      if (prev.some(c => c.id === id)) {
-        toast('La categoría ya existe', 'error');
-        return prev;
+    if (categories.some(c => c.id === id)) {
+      toast('La categoría ya existe', 'error');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/calendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemType: 'category', itemData: catData })
+      });
+      const result = await res.json();
+      if (result.success && result.item) {
+        setCategories(prev => [...prev, result.item]);
+        toast('Categoría guardada en MongoDB Atlas', 'success');
+      } else {
+        toast('Error al guardar categoría en MongoDB', 'error');
       }
-      const updated = [...prev, newCat];
-      syncToFirebase(undefined, undefined, updated);
-      toast('Categoría agregada', 'success');
-      return updated;
-    });
-  }, [setCategories, toast, syncToFirebase]);
+    } catch (err) {
+      console.error('Error al guardar categoría:', err);
+      toast('Error de red al guardar categoría', 'error');
+    }
+  }, [categories, toast]);
 
-  const deleteCategory = useCallback((id) => {
-    setCategories(prev => {
-      if (prev.length <= 1) {
-        toast('Debes mantener al menos una categoría', 'error');
-        return prev;
+  const deleteCategory = useCallback(async (id) => {
+    if (categories.length <= 1) {
+      toast('Debes mantener al menos una categoría', 'error');
+      return;
+    }
+
+    const previousCategories = [...categories];
+    setCategories(prev => prev.filter(c => c.id !== id));
+
+    try {
+      const res = await fetch(`/api/calendar?id=${encodeURIComponent(id)}&itemType=category`, {
+        method: 'DELETE'
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast('Categoría eliminada de MongoDB Atlas', 'success');
+      } else {
+        toast('Error al eliminar categoría en MongoDB', 'error');
+        setCategories(previousCategories);
       }
-      const updated = prev.filter(c => c.id !== id);
-      syncToFirebase(undefined, undefined, updated);
-      toast('Categoría eliminada', 'success');
-      return updated;
-    });
-  }, [setCategories, toast, syncToFirebase]);
+    } catch (err) {
+      console.error('Error al eliminar categoría:', err);
+      toast('Error de red al eliminar categoría', 'error');
+      setCategories(previousCategories);
+    }
+  }, [categories, toast]);
 
-  // Events
-  const addEvent = useCallback((eventData) => {
-    const newEvent = { ...eventData, id: generateId() };
-    setEvents(prev => {
-      const updated = [...prev, newEvent];
-      syncToFirebase(updated, undefined, undefined);
-      return updated;
-    });
-    toast('Evento creado', 'success');
-    notifyBroadcast();
-    return newEvent;
-  }, [setEvents, toast, notifyBroadcast, syncToFirebase]);
+  // ==================== EVENTOS (MongoDB Atlas) ====================
+  const addEvent = useCallback(async (eventData) => {
+    const newEventData = { ...eventData, id: generateId() };
 
-  const updateEvent = useCallback((id, data) => {
-    setEvents(prev => {
-      const updated = prev.map(e => e.id === id ? { ...e, ...data } : e);
-      syncToFirebase(updated, undefined, undefined);
-      return updated;
-    });
-    toast('Evento actualizado', 'success');
-    notifyBroadcast();
-  }, [setEvents, toast, notifyBroadcast, syncToFirebase]);
+    try {
+      const res = await fetch('/api/calendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemType: 'event', itemData: newEventData })
+      });
+      const result = await res.json();
+      if (result.success && result.item) {
+        setEvents(prev => [...prev, result.item]);
+        toast('Evento creado en MongoDB Atlas', 'success');
+        return result.item;
+      } else {
+        toast('Error al guardar evento en MongoDB', 'error');
+      }
+    } catch (err) {
+      console.error('Error al crear evento:', err);
+      toast('Error de red al crear evento', 'error');
+    }
+  }, [toast]);
 
-  const deleteEvent = useCallback((id) => {
-    setEvents(prev => {
-      const updated = prev.filter(e => e.id !== id);
-      syncToFirebase(updated, undefined, undefined);
-      return updated;
-    });
-    toast('Evento eliminado', 'success');
-    notifyBroadcast();
-  }, [setEvents, toast, notifyBroadcast, syncToFirebase]);
+  const updateEvent = useCallback(async (id, data) => {
+    const previousEvents = [...events];
+    setEvents(prev => prev.map(e => e.id === id ? { ...e, ...data } : e));
 
-  // Team
-  const addMember = useCallback((name, role) => {
+    try {
+      const res = await fetch('/api/calendar', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemType: 'event', id, data })
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast('Evento actualizado en MongoDB Atlas', 'success');
+      } else {
+        toast('Error al actualizar evento en MongoDB', 'error');
+        setEvents(previousEvents);
+      }
+    } catch (err) {
+      console.error('Error al actualizar evento:', err);
+      toast('Error de red al actualizar evento', 'error');
+      setEvents(previousEvents);
+    }
+  }, [events, toast]);
+
+  const deleteEvent = useCallback(async (id) => {
+    const previousEvents = [...events];
+    setEvents(prev => prev.filter(e => e.id !== id));
+
+    try {
+      const res = await fetch(`/api/calendar?id=${encodeURIComponent(id)}&itemType=event`, {
+        method: 'DELETE'
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast('Evento eliminado de MongoDB Atlas', 'success');
+      } else {
+        toast('Error al eliminar evento en MongoDB', 'error');
+        setEvents(previousEvents);
+      }
+    } catch (err) {
+      console.error('Error al eliminar evento:', err);
+      toast('Error de red al eliminar evento', 'error');
+      setEvents(previousEvents);
+    }
+  }, [events, toast]);
+
+  // ==================== EQUIPO (MongoDB Atlas) ====================
+  const addMember = useCallback(async (name, role) => {
     const parts = name.split(' ');
     const initials = (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
     const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
-    const member = { id: Date.now(), name, role: role || 'Miembro', avatar: initials, color, status: 'online', photo: null };
-    setTeam(prev => {
-      const updated = [...prev, member];
-      syncToFirebase(undefined, updated, undefined);
-      return updated;
-    });
-    toast('Miembro agregado', 'success');
-    notifyBroadcast();
-  }, [setTeam, toast, notifyBroadcast, syncToFirebase]);
+    const memberData = { id: Date.now(), name, role: role || 'Miembro', avatar: initials, color, status: 'online', photo: null };
 
-  const deleteMember = useCallback((id) => {
-    setTeam(prev => {
-      const updated = prev.filter(m => m.id !== id);
-      syncToFirebase(undefined, updated, undefined);
-      return updated;
-    });
+    try {
+      const res = await fetch('/api/calendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemType: 'team', itemData: memberData })
+      });
+      const result = await res.json();
+      if (result.success && result.item) {
+        setTeam(prev => [...prev, result.item]);
+        toast('Miembro agregado a MongoDB Atlas', 'success');
+      } else {
+        toast('Error al guardar miembro en MongoDB', 'error');
+      }
+    } catch (err) {
+      console.error('Error al agregar miembro:', err);
+      toast('Error de red al agregar miembro', 'error');
+    }
+  }, [toast]);
+
+  const deleteMember = useCallback(async (id) => {
+    const previousTeam = [...team];
+    setTeam(prev => prev.filter(m => m.id !== id));
     if (filterMemberId === id) setFilterMemberId(null);
-    toast('Miembro eliminado', 'success');
-    notifyBroadcast();
-  }, [setTeam, filterMemberId, toast, notifyBroadcast, syncToFirebase]);
 
-  const updateMemberRole = useCallback((id, newRole) => {
-    setTeam(prev => {
-      const updated = prev.map(m => m.id === id ? { ...m, role: newRole } : m);
-      syncToFirebase(undefined, updated, undefined);
-      return updated;
-    });
-    toast('Rol actualizado', 'success');
-    notifyBroadcast();
-  }, [setTeam, toast, notifyBroadcast, syncToFirebase]);
+    try {
+      const res = await fetch(`/api/calendar?id=${encodeURIComponent(id)}&itemType=team`, {
+        method: 'DELETE'
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast('Miembro eliminado de MongoDB Atlas', 'success');
+      } else {
+        toast('Error al eliminar miembro en MongoDB', 'error');
+        setTeam(previousTeam);
+      }
+    } catch (err) {
+      console.error('Error al eliminar miembro:', err);
+      toast('Error de red al eliminar miembro', 'error');
+      setTeam(previousTeam);
+    }
+  }, [team, filterMemberId, toast]);
 
-  const updateMemberPhoto = useCallback((id, photoBase64) => {
-    setTeam(prev => {
-      const updated = prev.map(m => m.id === id ? { ...m, photo: photoBase64 } : m);
-      syncToFirebase(undefined, updated, undefined);
-      return updated;
-    });
-    toast('Foto actualizada', 'success');
-    notifyBroadcast();
-  }, [setTeam, toast, notifyBroadcast, syncToFirebase]);
+  const updateMemberRole = useCallback(async (id, newRole) => {
+    const previousTeam = [...team];
+    setTeam(prev => prev.map(m => m.id === id ? { ...m, role: newRole } : m));
 
-  // Filtered events
+    try {
+      const res = await fetch('/api/calendar', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemType: 'team', id, data: { role: newRole } })
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast('Rol actualizado en MongoDB Atlas', 'success');
+      } else {
+        toast('Error al actualizar rol en MongoDB', 'error');
+        setTeam(previousTeam);
+      }
+    } catch (err) {
+      console.error('Error al actualizar rol:', err);
+      toast('Error de red al actualizar rol', 'error');
+      setTeam(previousTeam);
+    }
+  }, [team, toast]);
+
+  const updateMemberPhoto = useCallback(async (id, photoBase64) => {
+    const previousTeam = [...team];
+    setTeam(prev => prev.map(m => m.id === id ? { ...m, photo: photoBase64 } : m));
+
+    try {
+      const res = await fetch('/api/calendar', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemType: 'team', id, data: { photo: photoBase64 } })
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast('Foto actualizada en MongoDB Atlas', 'success');
+      } else {
+        toast('Error al actualizar foto en MongoDB', 'error');
+        setTeam(previousTeam);
+      }
+    } catch (err) {
+      console.error('Error al actualizar foto:', err);
+      toast('Error de red al actualizar foto', 'error');
+      setTeam(previousTeam);
+    }
+  }, [team, toast]);
+
+  // Eventos filtrados
   const getFilteredEvents = useCallback(() => {
     if (!filterMemberId) return events;
     return events.filter(e => e.assignees && e.assignees.includes(filterMemberId));
   }, [events, filterMemberId]);
 
-  // Open modal helpers
+  // Ayudantes de modales
   const openNewEvent = useCallback((defaults = {}) => {
     setEditingEvent(null);
     setEventModalDefaults(defaults);
@@ -306,6 +364,7 @@ export function AppProvider({ children }) {
     selectedDate, setSelectedDate,
     filterMemberId, setFilterMemberId,
     toasts, toast,
+    loading, fetchCalendarData,
     eventModalOpen, setEventModalOpen,
     editingEvent, setEditingEvent,
     eventModalDefaults, setEventModalDefaults,
@@ -319,7 +378,6 @@ export function AppProvider({ children }) {
     getFilteredEvents,
     openNewEvent, openEditEvent, openNewTask,
     notificationsEnabled, requestNotifications,
-    firebaseActive: firebaseReady.current,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
