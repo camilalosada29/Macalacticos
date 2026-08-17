@@ -224,8 +224,8 @@ export default async function handler(req, res) {
     console.error('Error en API /api/calendar:', error);
     return res.status(500).json({
       success: false,
-      error: 'Error interno del servidor en MongoDB',
-      message: error.message
+      error: error.message || 'Error interno del servidor en MongoDB',
+      details: String(error)
     });
   }
 }
