@@ -1,47 +1,4 @@
-import { MongoClient } from 'mongodb';
-
-// Configuración de MongoDB Atlas
-const DEFAULT_URI = "mongodb+srv://camilalosada29_db_user:pLl5v7hBbGpkOR47@cluster0.9gtunbm.mongodb.net/?appName=Cluster0";
-const DB_NAME = 'Camila';
-const COLLECTION_NAME = 'CamilaCalendar';
-
-let cachedClient = global._mongoClient || null;
-let cachedDb = global._mongoDb || null;
-
-async function connectToDatabase() {
-  const uri = process.env.MONGODB_URI || DEFAULT_URI;
-
-  if (cachedClient && cachedDb) {
-    try {
-      await cachedDb.command({ ping: 1 });
-      return { client: cachedClient, db: cachedDb, collection: cachedDb.collection(COLLECTION_NAME) };
-    } catch {
-      cachedClient = null;
-      cachedDb = null;
-    }
-  }
-
-  const client = new MongoClient(uri, {
-    maxPoolSize: 10,
-    connectTimeoutMS: 10000,
-    serverSelectionTimeoutMS: 10000,
-  });
-
-  await client.connect();
-  const db = client.db(DB_NAME);
-
-  global._mongoClient = client;
-  global._mongoDb = db;
-
-  cachedClient = client;
-  cachedDb = db;
-
-  return {
-    client,
-    db,
-    collection: db.collection(COLLECTION_NAME)
-  };
-}
+import { connectToDatabase } from '../lib/mongodb.js';
 
 const DEFAULT_TEAM = [
   { id: 1, name: 'Camila Losada', role: 'Project Manager', avatar: 'CL', color: '#E91E63', status: 'online' },
@@ -115,7 +72,7 @@ function normalizeId(id) {
 }
 
 export default async function handler(req, res) {
-  // Cabeceras CORS completas para Vercel
+  // CORS
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, PATCH, DELETE, POST, PUT');
@@ -128,15 +85,14 @@ export default async function handler(req, res) {
   try {
     const { collection } = await connectToDatabase();
 
-    // ==================== GET: CONSULTAR TODO ====================
+    // ==================== GET ====================
     if (req.method === 'GET') {
       const docs = await collection.find({}).toArray();
 
-      let teamDocs = docs.filter(d => d.entityType === 'team' || (d.role && d.name));
-      let categoryDocs = docs.filter(d => d.entityType === 'category' || (d.name && d.color && !d.role && !d.date));
-      let eventDocs = docs.filter(d => d.entityType === 'event' || (d.title && (d.date || d.type)));
+      let teamDocs = docs.filter(d => d.entityType === 'team');
+      let categoryDocs = docs.filter(d => d.entityType === 'category');
+      let eventDocs = docs.filter(d => d.entityType === 'event');
 
-      // Si la colección está vacía en MongoDB Atlas, sembrar datos iniciales
       if (docs.length === 0) {
         const initialTeam = DEFAULT_TEAM.map(m => ({ ...m, entityType: 'team' }));
         const initialCats = DEFAULT_CATEGORIES.map(c => ({ ...c, entityType: 'category' }));
@@ -150,7 +106,6 @@ export default async function handler(req, res) {
         eventDocs = initialEvts;
       }
 
-      // Mapear los documentos para retornar arreglos limpios a React
       const team = teamDocs.map(({ _id, entityType, ...rest }) => rest);
       const categories = categoryDocs.map(({ _id, entityType, ...rest }) => rest);
       const events = eventDocs.map(({ _id, entityType, ...rest }) => rest);
@@ -161,13 +116,13 @@ export default async function handler(req, res) {
       });
     }
 
-    // Parsear body por si viene como cadena JSON en Vercel
+    // Parsear body
     let body = req.body || {};
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch {}
     }
 
-    // ==================== POST: CREAR DOCUMENTO ====================
+    // ==================== POST ====================
     if (req.method === 'POST') {
       const { itemType, itemData } = body;
 
@@ -185,13 +140,10 @@ export default async function handler(req, res) {
       await collection.insertOne(newItem);
       const { _id, entityType, ...clientItem } = newItem;
 
-      return res.status(201).json({
-        success: true,
-        item: clientItem
-      });
+      return res.status(201).json({ success: true, item: clientItem });
     }
 
-    // ==================== PUT / PATCH: ACTUALIZAR DOCUMENTO ====================
+    // ==================== PUT / PATCH ====================
     if (req.method === 'PUT' || req.method === 'PATCH') {
       const { itemType, id, data } = body;
 
@@ -201,11 +153,8 @@ export default async function handler(req, res) {
 
       const normId = normalizeId(id);
       const numId = Number(id);
-
       const orConditions = [{ id: normId }, { id: String(id) }];
-      if (!isNaN(numId)) {
-        orConditions.push({ id: numId });
-      }
+      if (!isNaN(numId)) orConditions.push({ id: numId });
 
       const filter = {
         $or: [
@@ -214,23 +163,14 @@ export default async function handler(req, res) {
         ]
       };
 
-      const updateDoc = {
-        $set: {
-          ...data,
-          entityType: itemType,
-          updatedAt: new Date().toISOString()
-        }
-      };
-
-      const result = await collection.updateOne(filter, updateDoc);
-
-      return res.status(200).json({
-        success: true,
-        modifiedCount: result.modifiedCount
+      const result = await collection.updateOne(filter, {
+        $set: { ...data, entityType: itemType, updatedAt: new Date().toISOString() }
       });
+
+      return res.status(200).json({ success: true, modifiedCount: result.modifiedCount });
     }
 
-    // ==================== DELETE: ELIMINAR DOCUMENTO ====================
+    // ==================== DELETE ====================
     if (req.method === 'DELETE') {
       const id = req.query?.id || body?.id;
       const itemType = req.query?.itemType || body?.itemType;
@@ -241,11 +181,8 @@ export default async function handler(req, res) {
 
       const normId = normalizeId(id);
       const numId = Number(id);
-
       const orConditions = [{ id: normId }, { id: String(id) }];
-      if (!isNaN(numId)) {
-        orConditions.push({ id: numId });
-      }
+      if (!isNaN(numId)) orConditions.push({ id: numId });
 
       const filter = {
         $or: [
@@ -255,11 +192,7 @@ export default async function handler(req, res) {
       };
 
       const result = await collection.deleteOne(filter);
-
-      return res.status(200).json({
-        success: true,
-        deletedCount: result.deletedCount
-      });
+      return res.status(200).json({ success: true, deletedCount: result.deletedCount });
     }
 
     return res.status(405).json({ success: false, error: 'Método no permitido' });
@@ -267,8 +200,7 @@ export default async function handler(req, res) {
     console.error('Error en API /api/calendar:', error);
     return res.status(500).json({
       success: false,
-      error: error?.message || String(error),
-      details: 'Error de conexión con MongoDB Atlas en Vercel. Verifica el acceso de IP 0.0.0.0/0 en MongoDB Atlas Console -> Network Access.'
+      error: error?.message || String(error)
     });
   }
 }
